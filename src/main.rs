@@ -1,8 +1,8 @@
 use core::future::Future;
 use core::pin::Pin;
-//use std::sync::mpsc::{channel, Receiver, Sender};
-//use std::sync::{Arc, Mutex};
 use core::task::{Context, RawWaker, RawWakerVTable, Waker};
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex};
 
 /// A simple task container that holds a pinned future
 struct Task {
@@ -82,16 +82,15 @@ where
     F: Future<Output = ()> /**/ + Send /**/ + 'static,
 {
     let (sender, receiver) = channel();
-    let spawner = Spawner { sender };
-    let executor = Executor { receiver };
 
+    let spawner = Spawner { sender };
     spawner.spawn(fut);
+
+    let executor = Executor { receiver };
     executor.run();
 }
 
 fn main() {
-    let future = async {
-        println!("Hello from async task!");
-    };
+    let future = async {};
     new_runtime_and_spawn(future);
 }
