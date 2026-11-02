@@ -1,0 +1,3 @@
+# required so we declare our own _start
+[target.'cfg(target_os="linux")']
+rustflags = ["-C", "link-arg=-nostartfiles"]

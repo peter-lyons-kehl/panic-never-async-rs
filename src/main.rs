@@ -1,96 +1,123 @@
+// In addition to the following, we also have .cargo/config.toml. If your platform is other than
+// Linux, then
+// - find out what to put in .cargo/config.toml, and
+// - share it (by opening a GitHub issue, or even better, by a Pull Request), please.
+#![no_std]
+#![no_main]
+
+#[cfg(target_os = "linux")]
+use core::arch::asm;
+
 use core::future::Future;
-use core::pin::Pin;
-use core::task::{Context, RawWaker, RawWakerVTable, Waker};
-use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex};
+use core::hint;
+use core::mem::MaybeUninit;
+use core::pin::pin;
 
-/// A simple task container that holds a pinned future
-struct Task {
-    future: Mutex<Pin<Box<dyn Future<Output = ()> + Send>>>,
-    sender: Sender<Arc<Task>>,
+#[cfg(all(debug_assertions, target_os = "linux"))]
+compile_error!("Build in release profile only. Required by `panic_never`.");
+
+#[cfg(all(debug_assertions, not(target_os = "linux")))]
+compile_error!(
+    "(1) Build in release profile only. Required by `panic_never`. (2) You are not on Linux, so \
+     you may need to tweak .cargo/config.toml. Please do report any fixes. (3) You are not on \
+     Linux, so when you run the build (release) binary, it will run indefinitely. Use Ctrl+C or \
+     similar to stop it."
+);
+
+#[cfg(not(debug_assertions))]
+use panic_never as _;
+
+// This is NOT being used - because in debug mode we get the compile error from above. However, we
+// do include this in debug mode, otherwise (in debug mode) we would also get a confusing error:
+//
+// `#[panic_handler]` function required, but not found
+#[cfg(debug_assertions)]
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    loop {}
 }
 
-/// The spawner that pushes new tasks into the queue
-#[derive(Clone)]
-struct Spawner {
-    sender: Sender<Arc<Task>>,
-}
-
-impl Spawner {
-    fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
-        let task = Arc::new(Task {
-            future: Mutex::new(Box::pin(future)),
-            sender: self.sender.clone(),
-        });
-        let _ = self.sender.send(task);
+/// As per https://github.com/rust-lang/libc/discussions/5683, we don't use `libc::exit(..)`.
+///
+/// Neither we use `exit-no-std` (which itself on systems other than DOS/Windows uses
+/// `libc::exit(..)`).
+///
+/// Neither we use `rustix` (which supposedly does use a syscall rather than `libc` on Linux, but
+/// it uses `libc` on FreeBSD/NetBSD, even though those two BSD unixes (unlike OpenBSD) _do_ allow
+/// direct invocation of syscalls).
+///
+/// It most likely _is_ possible to use `libc::exit(..)` (directly, or through `exit-no-std` or
+/// `rustix`) in `no_std` and `no_main` and with `panic-never`, but with much more boiler plate. See
+/// https://github.com/rust-lang/libc/discussions/5683.
+#[cfg(target_os = "linux")]
+fn exit(status: i32) -> ! {
+    unsafe {
+        asm!(
+            "syscall",
+            in("rax") 60,
+            in("rdi") status,
+            options(noreturn)
+        );
     }
 }
 
-/// The executor that pulls and polls tasks until the queue is empty
-struct Executor {
-    receiver: Receiver<Arc<Task>>,
+#[unsafe(no_mangle)]
+pub extern "C" fn _start() -> ! {
+    let future = async {
+        outer().await;
+    };
+    if core::hint::black_box(false) {
+        new_dummy_runtime_and_poll(future);
+    }
+
+    #[cfg(target_os = "linux")]
+    exit(0);
+
+    #[cfg_attr(target_os = "linux", allow(unreachable_code))]
+    loop {}
 }
 
-impl Executor {
-    fn run(&self) {
-        while let Ok(task) = self.receiver.recv() {
-            let waker = waker_ref(&task);
-            let mut cx = Context::from_waker(&waker);
-            let mut future = task.future.lock().unwrap();
-
-            // Poll the future; if it's not ready, the waker will re-enqueue the task when woken
-            let _ = future.as_mut().poll(&mut cx);
-        }
-    }
-}
-
-/// Helper function to create a `Waker` from an `Arc<Task>`
-fn waker_ref(task: &Arc<Task>) -> Waker {
-    // Clone the Arc and turn it into a raw pointer
-    let ptr = Arc::into_raw(task.clone()) as *const ();
-
-    // Define the vtable for raw waker manipulation
-    unsafe fn clone(ptr: *const ()) -> RawWaker {
-        Arc::increment_strong_count(ptr as *const Task);
-        RawWaker::new(ptr, &VTABLE)
-    }
-
-    unsafe fn wake(ptr: *const ()) {
-        let task = Arc::from_raw(ptr as *const Task);
-        let _ = task.sender.send(task.clone());
-    }
-
-    unsafe fn wake_by_ref(ptr: *const ()) {
-        let task = Arc::from_raw(ptr as *const Task);
-        let _ = task.sender.send(task.clone());
-        // Prevent `Arc::drop` from prematurely decrementing count since we didn't consume ownership here
-        std::mem::forget(task);
-    }
-
-    unsafe fn drop_waker(ptr: *const ()) {
-        let _ = Arc::from_raw(ptr as *const Task);
-    }
-
-    const VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop_waker);
-
-    unsafe { Waker::from_raw(RawWaker::new(ptr, &VTABLE)) }
-}
-
-/// Entry point to initialize and run the dummy runtime
-fn new_runtime_and_spawn<F>(fut: F)
+fn new_dummy_runtime_and_poll<F>(fut: F)
 where
-    F: Future<Output = ()> /**/ + Send /**/ + 'static,
+    F: Future<Output = ()>,
 {
-    let (sender, receiver) = channel();
+    let fut_pinned = pin!(fut);
+    // We _cannot_ use loop {} to yield dummy value here. Otherwise the compiler optimizes away the
+    // rest of the code - and we don't want that, because then we don't get the linking failure that
+    // we _do_ want to get (if there is a panic used and that panic is reachable when run by a
+    // normal async runtime)!
+    //
+    //let mut context = loop {};
+    let mut context = unsafe {
+        #[allow(invalid_value)]
+        MaybeUninit::uninit().assume_init()
+    };
 
-    let spawner = Spawner { sender };
-    spawner.spawn(fut);
+    let _ = fut_pinned.poll(&mut context);
+}
+//-------
 
-    let executor = Executor { receiver };
-    executor.run();
+async fn outer() {
+    inner().await
 }
 
-fn main() {
-    let future = async {};
-    new_runtime_and_spawn(future);
+async fn awaited_panic_but_never_reached() {
+    panic!()
+}
+
+async fn never_awaited_panic() {
+    // the following _is_ .await-ed on; but the current function is _never_ .await-ed on.
+    awaited_panic_but_never_reached().await;
+    panic!()
+}
+
+async fn inner() {
+    // intentionally no .await
+    #[allow(unused_must_use)]
+    core::hint::black_box(never_awaited_panic());
+
+    // @TODO
+    if hint::black_box(true) {
+        //panic!()
+    }
 }

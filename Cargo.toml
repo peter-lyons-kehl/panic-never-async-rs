@@ -1,6 +1,25 @@
 [package]
-name = "async-runtime-no-panic"
+name = "panic-never-async"
+description = "Guarantee that *async* code can't ever panic"
+categories = ["no-std", "no-std::no-alloc", "asynchronous", "rust-patterns"]
+keywords = ["no-panic", "verification", "async"]
+license = "MIT OR Apache-2.0"
+
 version = "0.1.0"
-edition = "2024"
+edition = "2018"
+authors = ["Peter Lyons Kehl <peter.kehl@gmail.com>"]
+repository = "https://github.com/peter-lyons-kehl/panic-never-async-rs"
 
 [dependencies]
+panic-never = "0.1.0"
+
+[[bin]]
+name = "main"
+path = "src/main.rs"
+test = false
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
