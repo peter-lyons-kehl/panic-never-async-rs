@@ -11,7 +11,8 @@ use core::arch::asm;
 use core::future::Future;
 use core::hint;
 use core::mem::MaybeUninit;
-use core::pin::pin;
+use core::pin::{pin, Pin};
+use core::task::{Context, RawWaker, RawWakerVTable, Waker};
 
 #[cfg(all(debug_assertions, target_os = "linux"))]
 compile_error!("Build in release profile only. Required by `panic_never`.");
@@ -67,19 +68,19 @@ pub extern "C" fn _start() -> ! {
         outer().await;
     };
     if core::hint::black_box(false) {
-        new_dummy_runtime_and_poll(future);
+        //new_dummy_runtime_and_poll_1(future);
+        new_dummy_runtime_and_poll_2(future);
     }
 
     #[cfg(target_os = "linux")]
     exit(0);
-
     #[cfg_attr(target_os = "linux", allow(unreachable_code))]
     loop {}
 }
 
-fn new_dummy_runtime_and_poll<F>(fut: F)
+fn new_dummy_runtime_and_poll_1<F>(fut: F)
 where
-    F: Future<Output = ()>,
+    F: Future,
 {
     let fut_pinned = pin!(fut);
     // We _cannot_ use loop {} to yield dummy value here. Otherwise the compiler optimizes away the
@@ -94,6 +95,42 @@ where
     };
 
     let _ = fut_pinned.poll(&mut context);
+}
+//-------
+
+fn dummy_raw_waker() -> RawWaker {
+    unsafe fn clone(_: *const ()) -> RawWaker {
+        dummy_raw_waker()
+    }
+    unsafe fn wake(_: *const ()) {}
+    unsafe fn wake_by_ref(_: *const ()) {}
+    unsafe fn drop(_: *const ()) {}
+
+    let vtable = &RawWakerVTable::new(clone, wake, wake_by_ref, drop);
+    RawWaker::new(hint::black_box(core::ptr::null()), vtable)
+}
+
+pub fn dummy_waker() -> Waker {
+    //@TODO docs that we don't use loop {}
+    //
+    // We don't use: unsafe{ #[allow(invalid_value)] MaybeUninit::uninit().assume_init() }
+    unsafe { Waker::from_raw(dummy_raw_waker()) }
+}
+
+pub fn new_dummy_runtime_and_poll_2<F>(mut future: F)
+where
+    F: Future,
+{
+    // Prevent aggressive constant folding / dead code stripping
+    let mut pinned = unsafe { Pin::new_unchecked(&mut future) };
+    let waker = hint::black_box(dummy_waker());
+    let mut cx = Context::from_waker(&waker);
+
+    // Force evaluation of the poll function pointer
+    let _ = hint::black_box(pinned.as_mut().poll(&mut cx));
+
+    // Retain ownership reference in black_box
+    hint::black_box(future);
 }
 //-------
 
@@ -113,11 +150,13 @@ async fn never_awaited_panic() {
 
 async fn inner() {
     // intentionally no .await
-    #[allow(unused_must_use)]
-    core::hint::black_box(never_awaited_panic());
+    let _ = core::hint::black_box(never_awaited_panic());
 
     // @TODO
     if hint::black_box(true) {
         //panic!()
     }
+    // @TODO The following exit(anything) DOES MAKE the binary involve panic
+    //
+    exit(0);
 }
