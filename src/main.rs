@@ -12,7 +12,7 @@ use core::future::Future;
 use core::hint;
 use core::mem::MaybeUninit;
 use core::pin::{pin, Pin};
-use core::task::{Context, RawWaker, RawWakerVTable, Waker};
+use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 #[cfg(all(debug_assertions, target_os = "linux"))]
 compile_error!("Build in release profile only. Required by `panic_never`.");
@@ -67,9 +67,10 @@ pub extern "C" fn _start() -> ! {
     let future = async {
         outer().await;
     };
+
     if core::hint::black_box(false) {
-        //new_dummy_runtime_and_poll_1(future);
-        new_dummy_runtime_and_poll_2(future);
+        new_dummy_runtime_and_poll_1(future);
+        //new_dummy_runtime_and_poll_2(future);
     }
 
     #[cfg(target_os = "linux")]
@@ -122,12 +123,17 @@ where
     F: Future,
 {
     // Prevent aggressive constant folding / dead code stripping
-    let mut pinned = unsafe { Pin::new_unchecked(&mut future) };
-    let waker = hint::black_box(dummy_waker());
-    let mut cx = Context::from_waker(&waker);
+    loop {
+        let mut pinned = unsafe { Pin::new_unchecked(&mut future) };
+        let waker = hint::black_box(dummy_waker());
+        let mut cx = Context::from_waker(&waker);
 
-    // Force evaluation of the poll function pointer
-    let _ = hint::black_box(pinned.as_mut().poll(&mut cx));
+        // Force evaluation of the poll function pointer
+        let poll = hint::black_box(pinned.as_mut().poll(&mut cx));
+        if let Poll::Ready(_) = poll {
+            break;
+        }
+    }
 
     // Retain ownership reference in black_box
     hint::black_box(future);
@@ -143,13 +149,19 @@ async fn outer() {
 
     inner().await;
 
+    if hint::black_box(false) {
+        // BAD: This
+        panic!();
+    }
+
+    just_exit().await;
+
     // But, with both
-    // - the above line, and
-    // - any (or both) of the following two lines, build succeeds (in release) - no panic
+    // - the first (non-comment) line of this function, and
+    // - the following line, build succeeds (in release) - no panic
     //
     // branch!
 
-    //just_exit().await;
     exit(2);
 }
 
