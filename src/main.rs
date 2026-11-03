@@ -134,18 +134,50 @@ where
 }
 //-------
 
+async fn just_exit() {
+    exit(1);
+}
+
 async fn outer() {
-    inner().await
+    // With the following line alone (in this function), build fails (in release) indicating a panic branch
+
+    inner().await;
+
+    // But, with both
+    // - the above line, and
+    // - any (or both) of the following two lines, build succeeds (in release) - no panic
+    //
+    // branch!
+
+    //just_exit().await;
+    exit(2);
 }
 
 async fn awaited_panic_but_never_reached() {
     panic!()
 }
 
+macro_rules! mawait {
+    ($e: expr) => {
+        $e.await
+    };
+}
 async fn never_awaited_panic() {
     // the following _is_ .await-ed on; but the current function is _never_ .await-ed on.
-    awaited_panic_but_never_reached().await;
+    //awaited_panic_but_never_reached().await;
+    mawait! { awaited_panic_but_never_reached() };
     panic!()
+}
+
+macro_rules! masync {
+    ($name: ident<> () where () {}
+    ) => {};
+}
+struct S;
+impl S {
+    masync!(
+        f<>() where () {}
+    );
 }
 
 async fn inner() {
@@ -158,5 +190,5 @@ async fn inner() {
     }
     // @TODO The following exit(anything) DOES MAKE the binary involve panic
     //
-    exit(0);
+    exit(3);
 }
